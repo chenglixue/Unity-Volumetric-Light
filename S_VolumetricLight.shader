@@ -1,4 +1,4 @@
-Shader "LightShaft"
+Shader "S_LightShaft"
 {
     SubShader
     {
@@ -7,10 +7,9 @@ Shader "LightShaft"
         ZTest Always
 
         HLSLINCLUDE
+        #pragma target 4.5
+        #pragma enable_d3d11_debug_symbols
         #include "LightShaft.hlsl"
-        #pragma multi_compile _ _MAIN_LIGHT_SHADOWS                    //接受阴影
-        #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE            //产生阴影
-        #pragma multi_compile _ _SHADOWS_SOFT                          //软阴影
 
         PSInput VS(VSInput i)
         {
@@ -31,21 +30,22 @@ Shader "LightShaft"
         }
         ENDHLSL
         
+        // 0  
         Pass
         {
             Name "Light Shaft Pass"
             
-            
             HLSLPROGRAM
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS                    //接受阴影
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE            //产生阴影
+            #pragma multi_compile _ _SHADOWS_SOFT                          //软阴影
             #pragma shader_feature_local _ _TRANSPARENT_COLOR_ON
             
             #pragma vertex VS
             #pragma fragment LightShaft
 
-            PSOutput LightShaft(PSInput i) : SV_TARGET
+            void LightShaft(PSInput i, out PSOutput o)
             {
-                PSOutput o;
-                
                 float2 channel = floor(i.positionCS);
                 // 棋盘格刷新
                 clip(channel.y%2 * channel.x%2 + (channel.y+1)%2 * (channel.x+1)%2 - 0.1f);
@@ -64,12 +64,31 @@ Shader "LightShaft"
                 
                 half3 lightShaft = GetLightShaft(viewOrigin, viewDir, totalDistance, i.positionCS.xy);
                 o.color.rgb = lightShaft;
+            }
+            ENDHLSL
+        }
+
+        // 1
+        Pass
+        {
+            Name "Copy Depth"
+            
+            HLSLPROGRAM
+            #pragma vertex VS
+            #pragma fragment CopyDepth
+
+            PSOutput CopyDepth(PSInput i)
+            {
+                PSOutput o;
+                
+                o.color = Linear01Depth(_CameraDepthTexture.Sample(Smp_ClampU_ClampV_Linear, i.uv), _ZBufferParams);
                 
                 return o;
             }
             ENDHLSL
         }
 
+        // 2
         Pass
         {
             NAME "Composite"
@@ -104,44 +123,25 @@ Shader "LightShaft"
                 switch(index)
                 {
                     case 0:
-                        result += _LightShaftTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(0, 0.5f));
+                        result += _BlurTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(0, 0.5f));
                         break;
                     case 1:
-                        result += _LightShaftTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(0, -0.5f));
+                        result += _BlurTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(0, -0.5f));
                         break;
                     case 2:
-                        result += _LightShaftTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(0.5f, 0));
+                        result += _BlurTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(0.5f, 0));
                         break;
                     case 3:
-                        result += _LightShaftTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(-0.5f, 0));
+                        result += _BlurTex.Sample(Smp_ClampU_ClampV_Point, i.uv, int2(-0.5f, 0));
                         break;
                     default:
-                        result += _LightShaftTex.Sample(Smp_ClampU_ClampV_Point, i.uv);
+                        result += _BlurTex.Sample(Smp_ClampU_ClampV_Point, i.uv);
                         break;
                 }
                 
-                half4 sourceTex = SAMPLE_TEXTURE2D(_SourceTex, Smp_ClampU_ClampV_Linear, i.uv);
+                half4 sourceTex = SAMPLE_TEXTURE2D(_CameraColorTexture, Smp_ClampU_ClampV_Linear, i.uv);
                 result += sourceTex;
                 o.color = result;
-                
-                return o;
-            }
-            ENDHLSL
-        }
-
-        Pass
-        {
-            Name "Copy Depth"
-            
-            HLSLPROGRAM
-            #pragma vertex VS
-            #pragma fragment CopyDepth
-
-            PSOutput CopyDepth(PSInput i)
-            {
-                PSOutput o;
-                
-                o.color = Linear01Depth(_CameraDepthTexture.Sample(Smp_ClampU_ClampV_Linear, i.uv), _ZBufferParams);
                 
                 return o;
             }
