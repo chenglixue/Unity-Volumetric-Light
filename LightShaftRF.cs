@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace UnityEngine.Rendering.Universal
@@ -9,19 +10,10 @@ namespace UnityEngine.Rendering.Universal
         {
             public string m_profilerTag = "LightShaft Pass";
             public RenderPassEvent m_passEvent = RenderPassEvent.AfterRenderingTransparents;
-            public Shader m_shader;
             public ComputeShader m_blurShader;
-            public RenderTextureFormat m_texFormat;
             
-            public enum DownSample
-            {
-                off = 1,
-                half = 2,
-                third = 3,
-                fourth = 4
-            }
             [Header("Light Shaft Settings")]
-            public DownSample downSample = DownSample.off;
+            [Range(1, 10)]public int downSample = 1;
             [Range(1, 16)]   public int stepCount = 16;
             [Range(0, 1000)] public float maxDistance = 400f;
             [Range(-1, 1)]   public float HGFactor = 1f;
@@ -69,8 +61,9 @@ namespace UnityEngine.Rendering.Universal
         {
             var lightShaftVolume = VolumeManager.instance.stack.GetComponent<LightShaftVolume>();
             
-                m_LightShaftRenderPass.Setup(lightShaftVolume, (UniversalRenderer)renderer);
-                renderer.EnqueuePass(m_LightShaftRenderPass);
+            m_LightShaftRenderPass.ConfigureInput(ScriptableRenderPassInput.Motion | ScriptableRenderPassInput.Depth);
+            m_LightShaftRenderPass.Setup(lightShaftVolume, (UniversalRenderer)renderer);
+            renderer.EnqueuePass(m_LightShaftRenderPass);
         }
     }   
     
@@ -84,17 +77,23 @@ namespace UnityEngine.Rendering.Universal
         private UniversalRenderer        _Renderer;
         
         private RenderTextureDescriptor _descriptor;
-        private RenderTargetIdentifier  _cameraColorIden;
-        private RenderTargetIdentifier  _cameraDepthRT;
-        private RenderTargetIdentifier  _OddBuffer;
-        private RenderTargetIdentifier  _EvenBuffer;
-        private RenderTargetIdentifier  _LowResDepthRT;
-        private static int _OddBufferTexID   = Shader.PropertyToID("_OddBuffer");
-        private static int _EvenBufferTexID  = Shader.PropertyToID("_EvenBuffer");
-        private static int _cameraColorTexID = Shader.PropertyToID("_CameraColorTexture");
-        private static int _cameraDepthTexID = Shader.PropertyToID("_CameraDepthTexture");
-        private static int _lowResDepthTexID = Shader.PropertyToID("_LowResDepthTexture");
+        private RenderTargetIdentifier  _cameraRTI;
+        private RenderTargetIdentifier  _cameraColorRTI;
+        private RenderTargetIdentifier  _cameraDepthRTI;
+        private RenderTargetIdentifier  _lightShaftRTI;
+        private RenderTargetIdentifier  _blurRTI;
+        private RenderTargetIdentifier  _lowResDepthRTI;
+        internal struct ShaderID
+        {
+            public static int _cameraColorTexID = Shader.PropertyToID("_CameraColorTexture");
+            public static int _lightShaftTexID  = Shader.PropertyToID("_LightShaftTex");
+            public static int _blurTexID        = Shader.PropertyToID("_BlurTex");
+            public static int _lowResDepthTexID = Shader.PropertyToID("_LowResDepthTex");
+        }
         private Vector2Int m_texSize;
+        
+        private Matrix4x4 _Pre_Matrix_VP;
+        private Matrix4x4 _Curr_Matrix_VP;
         #endregion
 
         #region Setup
@@ -103,15 +102,7 @@ namespace UnityEngine.Rendering.Universal
             this._passSetting = passSetting;
             renderPassEvent = _passSetting.m_passEvent;
             
-            if (_passSetting.m_shader == null)
-            {
-                _material = CoreUtils.CreateEngineMaterial("LightShaft");
-            }
-            else
-            {
-                _material = new Material(_passSetting.m_shader);
-            }
-
+            _material = new Material(Shader.Find("S_LightShaft"));
             _blurShader = _passSetting.m_blurShader;
         }
 
@@ -119,9 +110,6 @@ namespace UnityEngine.Rendering.Universal
         {
             _lightShaftVolume = lightShaftVolume;
             _Renderer = renderer;
-            
-            ConfigureInput(ScriptableRenderPassInput.Color);
-            ConfigureInput(ScriptableRenderPassInput.Depth);
         }
         
         public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData)
@@ -129,26 +117,26 @@ namespace UnityEngine.Rendering.Universal
             _descriptor = renderingData.cameraData.cameraTargetDescriptor;
             var originDesc = _descriptor;
             _descriptor.msaaSamples = 1;
-            _descriptor.enableRandomWrite = true;
-            _descriptor.depthBufferBits = 0;
-            _descriptor.colorFormat = _passSetting.m_texFormat;
-            _descriptor.width  /= (int)_passSetting.downSample;
-            _descriptor.height /= (int)_passSetting.downSample;
             m_texSize = new Vector2Int(_descriptor.width, _descriptor.height);
 
-            _cameraColorIden = _Renderer.cameraColorTarget;
-            _cameraDepthRT = _Renderer.cameraDepthTarget;
-            cmd.SetGlobalTexture(_cameraDepthTexID, _cameraDepthRT);
-            cmd.SetGlobalTexture(_cameraColorTexID, _cameraColorIden);
+            _cameraRTI      = _Renderer.cameraColorTarget;
+            _cameraDepthRTI = _Renderer.cameraDepthTarget;
             
-            _OddBuffer     = new RenderTargetIdentifier(_OddBufferTexID);
-            _EvenBuffer    = new RenderTargetIdentifier(_EvenBufferTexID);
-            _LowResDepthRT = new RenderTargetIdentifier(_lowResDepthTexID);
-            cmd.GetTemporaryRT(_OddBufferTexID,  originDesc, FilterMode.Point);
-            cmd.GetTemporaryRT(_EvenBufferTexID, _descriptor, FilterMode.Point);
-            _descriptor.colorFormat = RenderTextureFormat.R16;
-            cmd.GetTemporaryRT(_lowResDepthTexID, _descriptor, FilterMode.Point);
-            _descriptor.colorFormat = _passSetting.m_texFormat;
+            InitRTI(ref _cameraColorRTI, ShaderID._cameraColorTexID, _descriptor, cmd,
+                1, 1, RenderTextureFormat.Default, 0, 
+                true, true, false, FilterMode.Point);
+            
+            InitRTI(ref _lightShaftRTI, ShaderID._lightShaftTexID, _descriptor, cmd,
+                (int)_passSetting.downSample, (int)_passSetting.downSample, RenderTextureFormat.Default, 0, 
+                true, true, false, FilterMode.Point);
+            
+            InitRTI(ref _blurRTI, ShaderID._blurTexID, _descriptor, cmd,
+                (int)_passSetting.downSample, (int)_passSetting.downSample, RenderTextureFormat.Default, 0, 
+                true, true, false, FilterMode.Point);
+            
+            InitRTI(ref _lowResDepthRTI, ShaderID._lowResDepthTexID, _descriptor, cmd,
+                (int)_passSetting.downSample, (int)_passSetting.downSample, RenderTextureFormat.R16, 24, 
+                true, true, false, FilterMode.Point);
             
             if (_material != null)
             {
@@ -159,13 +147,60 @@ namespace UnityEngine.Rendering.Universal
                 _material.SetFloat("_HeightFromSeaLevel", _passSetting.heightFromSeaLevel);
                 _material.SetFloat("_Brightness", _passSetting.brightness);
                 _material.SetColor("_LightShaftColor", _passSetting.lightShaftColor);
+                
                 _material.SetVector("_TexParams", GetTextureSizeParams(m_texSize));
                 _material.SetTexture("_BlueNoiseTex", _passSetting.blueNoiseTex);
-                
+
                 _material.SetInt("_TransparentStepCounts", _passSetting.transparentSetting.stepCount);
                 _material.SetFloat("_TransparentMaxDistance", _passSetting.transparentSetting.maxDistance);
                 _material.SetFloat("_TransparentColorIntensity", _passSetting.transparentSetting.colorIntensity);
+                
+                var viewMatrix = renderingData.cameraData.GetViewMatrix();
+                var projectionMatrix = renderingData.cameraData.GetGPUProjectionMatrix();
+                cmd.SetGlobalMatrix("Matrix_V", viewMatrix);
+                cmd.SetGlobalMatrix("Matrix_I_V", viewMatrix.inverse);
+                cmd.SetGlobalMatrix("Matrix_P", projectionMatrix);
+                cmd.SetGlobalMatrix("Matrix_I_P", projectionMatrix.inverse);
+                _Curr_Matrix_VP = projectionMatrix * viewMatrix;
+                cmd.SetGlobalMatrix("Matrix_VP", _Curr_Matrix_VP);
+                cmd.SetGlobalMatrix("Matrix_I_VP", _Curr_Matrix_VP.inverse);
+                cmd.SetGlobalMatrix("_Pre_Matrix_VP", _Pre_Matrix_VP);
             }
+        }
+        
+        void InitRTI(ref RenderTargetIdentifier RTI, int texID, RenderTextureDescriptor descriptor, CommandBuffer cmd,
+            int downSampleWidth, int downSampleHeight, RenderTextureFormat colorFormat, 
+            int depthBufferBits, bool isUseMipmap, bool isAutoGenerateMips, bool isEnableRandomWrite,
+            FilterMode filterMode)
+        {
+            descriptor.width           /= downSampleWidth;
+            descriptor.height          /= downSampleHeight;
+            descriptor.colorFormat      = colorFormat;
+            descriptor.depthBufferBits  = depthBufferBits;
+            descriptor.useMipMap        = isUseMipmap;
+            descriptor.autoGenerateMips = isAutoGenerateMips;
+            descriptor.enableRandomWrite = true;
+            
+            RTI = new RenderTargetIdentifier(texID);
+            cmd.GetTemporaryRT(texID, descriptor, filterMode);
+            cmd.SetGlobalTexture(texID, RTI);
+        }
+        
+        void InitRT(ref RenderTargetIdentifier RTI, ref RenderTexture RT, int RTID, CommandBuffer cmd, Material material,
+            RenderTextureDescriptor descriptor, int downSampleWidth, int downSampleHeight, RenderTextureFormat colorFormat,
+            int depthBufferBits, bool isUseMipmap, bool isAutoGenerateMips, bool isEnableRandomWrite, FilterMode filterMode)
+        {
+            descriptor.width            = descriptor.width / downSampleWidth;
+            descriptor.height           = descriptor.height / downSampleHeight;
+            descriptor.useMipMap        = isUseMipmap;
+            descriptor.autoGenerateMips = isAutoGenerateMips;
+            descriptor.enableRandomWrite= isEnableRandomWrite;
+            descriptor.depthBufferBits  = depthBufferBits;
+            descriptor.colorFormat      = colorFormat;
+            RT                          = RenderTexture.GetTemporary(descriptor);
+            RT.filterMode               = filterMode;
+            RTI                         = new RenderTargetIdentifier(RT);
+            _material.SetTexture(RTID, RT);
         }
         #endregion
 
@@ -174,6 +209,20 @@ namespace UnityEngine.Rendering.Universal
         Vector4 GetTextureSizeParams(Vector2Int texSize)
         {
             return new Vector4(texSize.x, texSize.y, 1f / texSize.x, 1f / texSize.y);
+        }
+
+        void DoVolumetricLight(CommandBuffer cmd, Material material)
+        {
+            try
+            {
+                if (material == null) return;
+                cmd.Blit(null, _lightShaftRTI, material, 0);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+                throw;
+            }
         }
         
         private void DoKawaseSample(CommandBuffer cmd, RenderTargetIdentifier sourceid, RenderTargetIdentifier targetid,
@@ -218,9 +267,8 @@ namespace UnityEngine.Rendering.Universal
 
             using (new ProfilingScope(cmd, new ProfilingSampler(_passSetting.m_profilerTag)))
             {
-                cmd.Blit(_cameraColorIden, _OddBufferTexID);
-                cmd.SetGlobalTexture("_SourceTex", _OddBufferTexID);
-                cmd.Blit(_cameraColorIden, _EvenBufferTexID, _material, 0);
+                cmd.Blit(_cameraRTI, _cameraColorRTI);
+                DoVolumetricLight(cmd, _material);
                 
                 if ((int)_passSetting.transparentSetting.enableTransparentColor == 1)
                 {
@@ -233,6 +281,7 @@ namespace UnityEngine.Rendering.Universal
 
                 List<int> RTIDs = new List<int>();
                 List<Vector2Int> RTSizes = new List<Vector2Int>();
+                _descriptor.enableRandomWrite = true;
                 var tempDesc = _descriptor;
                 
                 int kawaseRTID = Shader.PropertyToID("_KawaseRT");
@@ -245,7 +294,7 @@ namespace UnityEngine.Rendering.Universal
                 float offsetRatio = downSampleAmount - (float)downSampleCount;
                 
                 var lastRTSize = m_texSize;
-                int lastRTID = _EvenBufferTexID;
+                int lastRTID = ShaderID._lightShaftTexID;
                 for (int i = 0; i <= downSampleCount; ++i)
                 {
                     int currRTID = Shader.PropertyToID("_KawaseRT" + i.ToString());
@@ -266,7 +315,7 @@ namespace UnityEngine.Rendering.Universal
                 if(downSampleCount == 0)
                 {
                     DoKawaseSample(cmd, RTIDs[1], RTIDs[0], RTSizes[1], RTSizes[0], 1.0f, false, _blurShader);
-                    DoKawaseLinear(cmd, _EvenBufferTexID, RTIDs[0], RTSizes[0], offsetRatio, _blurShader);
+                    DoKawaseLinear(cmd, _lightShaftRTI, RTIDs[0], RTSizes[0], offsetRatio, _blurShader);
                 }
                 else
                 {
@@ -298,11 +347,9 @@ namespace UnityEngine.Rendering.Universal
                     cmd.ReleaseTemporaryRT(intermediateRTID);
                 }
 
-                cmd.Blit(RTIDs[0], _EvenBufferTexID);
-                cmd.SetGlobalTexture("_LightShaftTex", _EvenBufferTexID);
-                cmd.Blit(_cameraColorIden, _lowResDepthTexID, _material, 2);
-                cmd.SetGlobalTexture("_LowResDepthTex", _lowResDepthTexID);
-                cmd.Blit(_OddBufferTexID, _cameraColorIden, _material, 1);
+                cmd.Blit(RTIDs[0], _blurRTI);
+                cmd.Blit(_blurRTI, _lowResDepthRTI, _material, 1);
+                cmd.Blit(_cameraColorRTI, _cameraRTI, _material, 2);
             }
             
             context.ExecuteCommandBuffer(cmd);
@@ -312,8 +359,9 @@ namespace UnityEngine.Rendering.Universal
         
         public override void OnCameraCleanup(CommandBuffer cmd)
         {
-            cmd.ReleaseTemporaryRT(_OddBufferTexID);
-            cmd.ReleaseTemporaryRT(_EvenBufferTexID);
+            cmd.ReleaseTemporaryRT(ShaderID._lightShaftTexID);
+            cmd.ReleaseTemporaryRT(ShaderID._blurTexID);
+            cmd.ReleaseTemporaryRT(ShaderID._lowResDepthTexID);
         }
         #endregion
     }
