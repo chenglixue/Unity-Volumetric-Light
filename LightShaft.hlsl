@@ -215,7 +215,7 @@ half3 GetLightShaft(float3 viewOrigin, half3 viewDir, float maxDistance, float2 
                 // 步进depth点位于半透明物体后面
                 if(transparentDepth < distanceCameraToDepth)
                 {
-                    float4 sourceColor = _SourceTex.Sample(Smp_ClampU_ClampV_Linear, depth_uv) * _TransparentColorIntensity;
+                    float4 sourceColor = _CameraColorTexture.Sample(Smp_ClampU_ClampV_Linear, depth_uv) * _TransparentColorIntensity;
                     currColor *= sourceColor;
                 }
 
